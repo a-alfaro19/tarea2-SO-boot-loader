@@ -43,3 +43,6 @@
 # Makefile generated files
 *.bin
 *.img
+
+*.fd
+*.efi
