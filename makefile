@@ -3,56 +3,78 @@
 # CE 4303 - Principios de Sistemas Operativos
 #
 # Targets:
-#   all          - Build everything
-#   legacy       - Build legacy MBR disk image
-#   uefi         - Build UEFI bootable disk image
-#   run-legacy   - Run legacy image in QEMU
-#   run-uefi     - Run UEFI image in QEMU (requires OVMF)
-#   clean        - Remove all build artifacts
+#   all              - Build legacy and uefi-c
+#   legacy           - Assemble legacy MBR disk image
+#   uefi-c           - Compile UEFI C game into a bootable disk image
+#   run-legacy       - Run legacy image in QEMU
+#   run-uefi-c       - Run UEFI C image in QEMU (requires OVMF)
+#   clean            - Remove all build artifacts
 # =============================================================================
 
-.PHONY: all legacy uefi run-legacy run-uefi clean
+.PHONY: all legacy uefi-c run-legacy run-uefi-c clean
 
-# ---- Tools ------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Tools
+# -----------------------------------------------------------------------------
 NASM    := nasm
 CC      := gcc
 LD      := ld
 DD      := dd
 QEMU    := qemu-system-x86_64
 
-# OVMF firmware for UEFI emulation (adjust path for your distro)
-# Ubuntu/Debian: sudo apt install ovmf  → /usr/share/OVMF/OVMF_CODE.fd
-# Arch:          sudo pacman -S edk2-ovmf → /usr/share/OVMF/OVMF_CODE.fd
-OVMF    := /usr/share/OVMF/OVMF_CODE.fd
+# mtools: userspace FAT filesystem tools, no root or loop devices needed.
+# Install: sudo apt install mtools
+MFORMAT := mformat
+MCOPY   := mcopy
+MMD     := mmd
 
-# ---- Output directories -----------------------------------------------------
-BUILD_LEGACY    := build/legacy
-BUILD_UEFI      := build/uefi
-BUILD_GAME      := build/game
+# gnu-efi paths (adjust if your distro installs elsewhere)
+# Install: sudo apt install gnu-efi
+EFI_INC     := /usr/include/efi
+EFI_LIB     := /usr/lib
+EFI_CRT_OBJ := $(EFI_LIB)/crt0-efi-x86_64.o
+EFI_LD      := $(EFI_LIB)/elf_x86_64_efi.lds
 
-all: legacy uefi
+# OVMF firmware for UEFI emulation.
+# Install: sudo apt install ovmf
+# QEMU needs two pflash drives:
+#   OVMF_CODE.fd  - read-only firmware code
+#   OVMF_VARS.fd  - writable NVRAM (EFI variable store)
+OVMF_CODE := /usr/share/OVMF/OVMF_CODE.fd
+OVMF_VARS := /usr/share/OVMF/OVMF_VARS.fd
+
+# -----------------------------------------------------------------------------
+# Build output directories
+# -----------------------------------------------------------------------------
+BUILD_LEGACY := build/legacy
+BUILD_UEFI_C := build/uefi_c
+BUILD_GAME   := build/game
+
+# -----------------------------------------------------------------------------
+# Default target
+# -----------------------------------------------------------------------------
+all: legacy uefi-c
 
 # =============================================================================
 # LEGACY BUILD
-# Creates a raw floppy/disk image: [sector1=boot.asm][sector2=game.bin]
+# Produces a 1.44MB floppy image:
+#   Sector 1 (512 bytes): boot.asm  (MBR bootloader)
+#   Sector 2+  :          game.bin  (assembled game)
 # =============================================================================
 legacy: $(BUILD_LEGACY)/disk.img
 	@echo ""
-	@echo "✔ Legacy disk image: $(BUILD_LEGACY)/disk.img"
+	@echo "  Legacy disk image: $(BUILD_LEGACY)/disk.img"
 	@echo "  Run with: make run-legacy"
 
-# 1. Assemble bootloader (must produce exactly 512 bytes)
+# Assemble MBR bootloader -- must be exactly 512 bytes
 $(BUILD_LEGACY)/boot.bin: legacy/boot.asm | $(BUILD_LEGACY)
 	$(NASM) -f bin $< -o $@
 	@size=$$(wc -c < $@); \
 	if [ "$$size" -ne 512 ]; then \
-	    echo "ERROR: boot.bin is $$size bytes, expected 512"; exit 1; \
+	    echo "ERROR: boot.bin is $$size bytes, expected exactly 512"; exit 1; \
 	fi
-	@echo "  boot.bin: $$(wc -c < $@) bytes"
 
-# 2. Assemble game (legacy real-mode, flat binary)
-# game_main.asm %include's all other modules — list them all as dependencies
-# so make rebuilds whenever any module changes.
+# Assemble game payload -- game_main.asm pulls in all modules via %include
 GAME_SOURCES := game/game_main.asm \
                 game/game_rand.asm \
                 game/game_input.asm \
@@ -61,184 +83,106 @@ GAME_SOURCES := game/game_main.asm \
 
 $(BUILD_GAME)/game.bin: $(GAME_SOURCES) | $(BUILD_GAME)
 	$(NASM) -f bin game/game_main.asm -o $@
-	@echo "  game.bin (legacy): $$(wc -c < $@) bytes"
 
-# 3. Create disk image: pad to 1.44MB floppy size
+# Create the floppy disk image: blank 1.44MB, then write both sectors
 $(BUILD_LEGACY)/disk.img: $(BUILD_LEGACY)/boot.bin $(BUILD_GAME)/game.bin
-	# Create blank 1.44MB image
-	$(DD) if=/dev/zero of=$@ bs=512 count=2880 status=none
-	# Write bootloader to sector 1
+	$(DD) if=/dev/zero                of=$@ bs=512 count=2880 status=none
 	$(DD) if=$(BUILD_LEGACY)/boot.bin of=$@ bs=512 seek=0 conv=notrunc status=none
-	# Write game to sector 2
-	$(DD) if=$(BUILD_GAME)/game.bin of=$@ bs=512 seek=1 conv=notrunc status=none
-	@echo "  Disk image created: $@"
+	$(DD) if=$(BUILD_GAME)/game.bin   of=$@ bs=512 seek=1 conv=notrunc status=none
 
 # =============================================================================
-# UEFI BUILD
-# Creates a GPT disk image with an EFI System Partition containing:
-#   EFI/BOOT/BOOTX64.EFI  (our UEFI bootloader)
-#   game.bin               (our 64-bit game payload)
+# UEFI C BUILD
+# Compiles uefi_game.c into a self-contained EFI application (BOOTX64.EFI),
+# then packages it into a bootable FAT32 disk image using mtools.
+#
+# mtools lets us create and populate a FAT filesystem entirely in userspace --
+# no sudo, no loop devices, no mount/umount needed.
 # =============================================================================
-uefi: $(BUILD_UEFI)/uefi_disk.img
+uefi-c: $(BUILD_UEFI_C)/uefi_disk.img
 	@echo ""
-	@echo "✔ UEFI disk image: $(BUILD_UEFI)/uefi_disk.img"
-	@echo "  Run with: make run-uefi"
-
-# 1. Build UEFI bootloader EFI application
-# Requires gnu-efi: sudo apt install gnu-efi
-EFI_INC     := /usr/include/efi
-EFI_LIB     := /usr/lib
-EFI_CRT_OBJ := $(EFI_LIB)/crt0-efi-x86_64.o
-EFI_LD      := $(EFI_LIB)/elf_x86_64_efi.lds
-
-$(BUILD_UEFI)/uefi_boot.o: uefi/uefi_boot.c | $(BUILD_UEFI)
-	$(CC) -I$(EFI_INC) -I$(EFI_INC)/x86_64 \
-	      -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
-	      -Wall -DEFI_FUNCTION_WRAPPER \
-	      -c $< -o $@
-
-$(BUILD_UEFI)/uefi_boot.so: $(BUILD_UEFI)/uefi_boot.o
-	$(LD) -nostdlib -znocombreloc -T $(EFI_LD) -shared \
-	      -Bsymbolic -L$(EFI_LIB) $(EFI_CRT_OBJ) $< \
-	      -o $@ -lefi -lgnuefi
-
-$(BUILD_UEFI)/BOOTX64.EFI: $(BUILD_UEFI)/uefi_boot.so
-	objcopy -j .text -j .sdata -j .data -j .dynamic \
-	        -j .dynsym -j .rel -j .rela -j .reloc \
-	        --target=efi-app-x86_64 $< $@
-
-# 2. Assemble 64-bit game payload
-$(BUILD_GAME)/game_uefi.bin: game/game_uefi.asm | $(BUILD_GAME)
-	$(NASM) -f bin $< -o $@
-	@echo "  game_uefi.bin: $$(wc -c < $@) bytes"
-
-# 3. Create UEFI bootable FAT image
-$(BUILD_UEFI)/uefi_disk.img: $(BUILD_UEFI)/BOOTX64.EFI $(BUILD_GAME)/game_uefi.bin
-	# Create blank 64MB image
-	$(DD) if=/dev/zero of=$@ bs=1M count=64 status=none
-	# Create GPT partition table with one EFI System Partition
-	parted -s $@ mklabel gpt
-	parted -s $@ mkpart EFI fat32 1MiB 63MiB
-	parted -s $@ set 1 esp on
-	# Format the partition as FAT32 (using losetup)
-	@LOOP=$$(sudo losetup --find --show --partscan $@); \
-	sudo mkfs.fat -F 32 $${LOOP}p1; \
-	sudo mkdir -p /tmp/efi_mount; \
-	sudo mount $${LOOP}p1 /tmp/efi_mount; \
-	sudo mkdir -p /tmp/efi_mount/EFI/BOOT; \
-	sudo cp $(BUILD_UEFI)/BOOTX64.EFI /tmp/efi_mount/EFI/BOOT/; \
-	sudo cp $(BUILD_GAME)/game_uefi.bin /tmp/efi_mount/game.bin; \
-	sudo umount /tmp/efi_mount; \
-	sudo losetup -d $$LOOP
-	@echo "  UEFI disk image created: $@"
-
-# =============================================================================
-# UEFI-C BUILD
-# game_uefi.c is a self-contained EFI application — it has its own efi_main()
-# and does NOT use uefi_boot.c. It compiles directly to BOOTX64.EFI.
-# The disk image layout is the same: one EFI System Partition, BOOTX64.EFI
-# at EFI/BOOT/ — no separate game.bin payload needed.
-# =============================================================================
-BUILD_UEFI_C := build/uefi_c
-
-uefi-c: $(BUILD_UEFI_C)/uefi_c_disk.img
-	@echo ""
-	@echo "✔ UEFI-C disk image: $(BUILD_UEFI_C)/uefi_c_disk.img"
+	@echo "  UEFI disk image: $(BUILD_UEFI_C)/uefi_disk.img"
 	@echo "  Run with: make run-uefi-c"
 
-$(BUILD_UEFI_C)/game_uefi.o: uefi/game_uefi.c | $(BUILD_UEFI_C)
+# Step 1: Compile to ELF object
+$(BUILD_UEFI_C)/game_uefi.o: uefi/uefi_game.c | $(BUILD_UEFI_C)
 	$(CC) -I$(EFI_INC) -I$(EFI_INC)/x86_64 \
 	      -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
 	      -Wall -DEFI_FUNCTION_WRAPPER \
 	      -c $< -o $@
 
+# Step 2: Link into a shared ELF using the EFI linker script
 $(BUILD_UEFI_C)/game_uefi.so: $(BUILD_UEFI_C)/game_uefi.o
-	$(LD) -nostdlib -znocombreloc -T $(EFI_LD) -shared \
-	      -Bsymbolic -L$(EFI_LIB) $(EFI_CRT_OBJ) $< \
+	$(LD) -nostdlib -znocombreloc \
+	      -T $(EFI_LD) -shared -Bsymbolic \
+	      -L$(EFI_LIB) $(EFI_CRT_OBJ) $< \
 	      -o $@ -lefi -lgnuefi
 
+# Step 3: Strip to a PE/COFF EFI binary
 $(BUILD_UEFI_C)/BOOTX64.EFI: $(BUILD_UEFI_C)/game_uefi.so
-	objcopy -j .text -j .sdata -j .data -j .dynamic \
-	        -j .dynsym -j .rel -j .rela -j .reloc \
-	        --target=efi-app-x86_64 $< $@
+	objcopy \
+	    -j .text -j .sdata -j .data -j .dynamic \
+	    -j .dynsym -j .rel -j .rela -j .reloc \
+	    --target=efi-app-x86_64 $< $@
 
-$(BUILD_UEFI_C)/uefi_c_disk.img: $(BUILD_UEFI_C)/BOOTX64.EFI
+# Step 4: Create a FAT32 disk image and populate it with mtools.
+#
+# mtools operates on raw image files directly via the @@@ offset syntax:
+#   file@@@offset means "treat the file starting at byte <offset> as a
+#   FAT filesystem". 1MiB = 1048576 bytes = where parted placed the ESP.
+# MTOOLS_SKIP_CHECK=1 suppresses geometry mismatch warnings on raw files.
+$(BUILD_UEFI_C)/uefi_disk.img: $(BUILD_UEFI_C)/BOOTX64.EFI
 	$(DD) if=/dev/zero of=$@ bs=1M count=64 status=none
 	parted -s $@ mklabel gpt
 	parted -s $@ mkpart EFI fat32 1MiB 63MiB
 	parted -s $@ set 1 esp on
-	@LOOP=$$(sudo losetup --find --show --partscan $@); \
-	sudo mkfs.fat -F 32 $${LOOP}p1; \
-	sudo mkdir -p /tmp/efi_mount; \
-	sudo mount $${LOOP}p1 /tmp/efi_mount; \
-	sudo mkdir -p /tmp/efi_mount/EFI/BOOT; \
-	sudo cp $(BUILD_UEFI_C)/BOOTX64.EFI /tmp/efi_mount/EFI/BOOT/; \
-	sudo umount /tmp/efi_mount; \
-	sudo losetup -d $$LOOP
-	@echo "  UEFI-C disk image created: $@"
+	MTOOLS_SKIP_CHECK=1 $(MFORMAT) -i $@@@1M -F -v EFI
+	MTOOLS_SKIP_CHECK=1 $(MMD)     -i $@@@1M ::/EFI
+	MTOOLS_SKIP_CHECK=1 $(MMD)     -i $@@@1M ::/EFI/BOOT
+	MTOOLS_SKIP_CHECK=1 $(MCOPY)   -i $@@@1M \
+	    $(BUILD_UEFI_C)/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
 
-run-uefi-c: $(BUILD_UEFI_C)/uefi_c_disk.img
-	@echo "Running UEFI-C game in QEMU..."
-	@if [ ! -f "$(OVMF)" ]; then \
-	    echo "ERROR: OVMF not found at $(OVMF)"; \
-	    echo "Install with: sudo apt install ovmf"; \
-	    exit 1; \
-	fi
-	$(QEMU) \
-	    -drive if=pflash,format=raw,file=$(OVMF),readonly=on \
-	    -drive format=raw,file=$(BUILD_UEFI_C)/uefi_c_disk.img \
-	    -m 256M \
-	    -no-reboot \
-	    -display sdl \
-	    -name "My Name - UEFI C Game"
+# =============================================================================
+# RUN TARGETS
+# =============================================================================
 
-$(BUILD_UEFI_C):
-	mkdir -p $@
-
-
+# Legacy: boot from floppy image.
+# -drive if=floppy tells QEMU to present this as floppy drive A:.
+# The BIOS sets DL=0x00 when jumping to the MBR, which is what
+# boot.asm expects when it saves the boot drive number.
 run-legacy: $(BUILD_LEGACY)/disk.img
-	@echo "Running legacy boot in QEMU..."
 	$(QEMU) \
-	    -drive format=raw,file=$(BUILD_LEGACY)/disk.img \
+	    -drive if=floppy,format=raw,file=$(BUILD_LEGACY)/disk.img \
 	    -m 32M \
 	    -no-reboot \
-	    -display sdl \
+	    -display gtk \
 	    -name "My Name - Legacy Boot"
 
-run-uefi: $(BUILD_UEFI)/uefi_disk.img
-	@echo "Running UEFI boot in QEMU..."
-	@if [ ! -f "$(OVMF)" ]; then \
-	    echo "ERROR: OVMF not found at $(OVMF)"; \
+# UEFI: boot from disk image using OVMF firmware.
+# Two pflash drives are required:
+#   index=0: OVMF_CODE.fd (read-only firmware code)
+#   index=1: OVMF_VARS.fd (writable NVRAM / EFI variable store)
+# We copy VARS to build/ so QEMU can write to it without touching
+# the system-installed file.
+run-uefi-c: $(BUILD_UEFI_C)/uefi_disk.img
+	@if [ ! -f "$(OVMF_CODE)" ]; then \
+	    echo "ERROR: OVMF not found at $(OVMF_CODE)"; \
 	    echo "Install with: sudo apt install ovmf"; \
 	    exit 1; \
 	fi
+	@cp $(OVMF_VARS) $(BUILD_UEFI_C)/OVMF_VARS_runtime.fd
 	$(QEMU) \
-	    -drive if=pflash,format=raw,file=$(OVMF),readonly=on \
-	    -drive format=raw,file=$(BUILD_UEFI)/uefi_disk.img \
+	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+	    -drive if=pflash,format=raw,file=$(BUILD_UEFI_C)/OVMF_VARS_runtime.fd \
+	    -drive format=raw,file=$(BUILD_UEFI_C)/uefi_disk.img \
 	    -m 256M \
 	    -no-reboot \
-	    -display sdl \
-	    -name "My Name - UEFI Boot"
-
-# Quick run without SDL (useful for headless/CI)
-run-legacy-nographic: $(BUILD_LEGACY)/disk.img
-	$(QEMU) \
-	    -drive format=raw,file=$(BUILD_LEGACY)/disk.img \
-	    -m 32M \
-	    -no-reboot \
-	    -nographic \
-	    -name "My Name - Legacy Boot"
+	    -display gtk \
+	    -name "My Name - UEFI C Game"
 
 # =============================================================================
 # BUILD DIRECTORIES
 # =============================================================================
-$(BUILD_LEGACY):
-	mkdir -p $@
-
-$(BUILD_UEFI):
-	mkdir -p $@
-
-$(BUILD_GAME):
+$(BUILD_LEGACY) $(BUILD_UEFI_C) $(BUILD_GAME):
 	mkdir -p $@
 
 # =============================================================================
@@ -246,4 +190,3 @@ $(BUILD_GAME):
 # =============================================================================
 clean:
 	rm -rf build/
-	@echo "Cleaned."
