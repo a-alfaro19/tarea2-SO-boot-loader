@@ -40,8 +40,8 @@ EFI_LD      := $(EFI_LIB)/elf_x86_64_efi.lds
 # QEMU needs two pflash drives:
 #   OVMF_CODE.fd  - read-only firmware code
 #   OVMF_VARS.fd  - writable NVRAM (EFI variable store)
-OVMF_CODE := /usr/share/OVMF/OVMF_CODE.fd
-OVMF_VARS := /usr/share/OVMF/OVMF_VARS.fd
+OVMF_CODE := /usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS := /usr/share/OVMF/OVMF_VARS_4M.fd
 
 # -----------------------------------------------------------------------------
 # Build output directories
@@ -82,7 +82,7 @@ GAME_SOURCES := game/game_main.asm \
                 game/game_glyphs.asm
 
 $(BUILD_GAME)/game.bin: $(GAME_SOURCES) | $(BUILD_GAME)
-	$(NASM) -f bin game/game_main.asm -o $@
+	$(NASM) -f bin -I game/ game/game_main.asm -o $@
 
 # Create the floppy disk image: blank 1.44MB, then write both sectors
 $(BUILD_LEGACY)/disk.img: $(BUILD_LEGACY)/boot.bin $(BUILD_GAME)/game.bin
@@ -167,6 +167,7 @@ run-uefi-c: $(BUILD_UEFI_C)/uefi_disk.img
 	@if [ ! -f "$(OVMF_CODE)" ]; then \
 	    echo "ERROR: OVMF not found at $(OVMF_CODE)"; \
 	    echo "Install with: sudo apt install ovmf"; \
+	    echo "Then check available files with: ls /usr/share/OVMF/"; \
 	    exit 1; \
 	fi
 	@cp $(OVMF_VARS) $(BUILD_UEFI_C)/OVMF_VARS_runtime.fd

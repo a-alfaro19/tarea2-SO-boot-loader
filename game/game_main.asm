@@ -18,6 +18,13 @@
 ; NASM stores 'dw 0xDEFD' as bytes [0xFD, 0xDE] (little-endian), which the
 ; CPU reads back as the 16-bit word 0xDEFD. ✓
 ;
+; Top-level flow:
+;   game_start
+;     └─ seed_rng            (seed PRNG from BIOS timer)
+;     └─ show_confirm_screen (wait for Y or ESC)
+;     └─ game_loop           (main input/render loop)
+;     └─ reboot              (on ESC or end)
+;
 ; Modules included (order matters — data labels must exist before use):
 ;   game_rand.asm    PRNG: seed_rng, rand_byte, rng_seed
 ;   game_input.asm   Keyboard: poll_key, wait_key
@@ -34,19 +41,26 @@
 ; -----------------------------------------------------------------------------
     dw 0xDEFD
 
-
 ; =============================================================================
 ; ENTRY POINT
 ; =============================================================================
 game_start:
     ; Reinitialize segment registers — boot.asm may have left them in any state
-    cli                         ; Disable interrupts while setting up segments
+    cli
     xor ax, ax
-    mov ds, ax                  ; DS = 0x0000
-    mov es, ax                  ; ES = 0x0000 (needed for string instructions)
-    mov ss, ax                  ; SS = 0x0000
-    mov sp, 0x7000              ; Stack at 0x7000, grows down — safely below our
-    sti                         ; code at 0x1000 and boot sector at 0x7C00
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x7000
+    sti
+
+    ; Force 80x25 16-color text mode.
+    ; INT 10h AH=00h clobbers DS in QEMU's BIOS — restore it immediately after.
+    mov ax, 0x0003
+    int 0x10
+    xor ax, ax
+    mov ds, ax          ; Restore DS=0, BIOS video interrupt clobbers it
+    mov es, ax          ; Restore ES=0 too, needed by lodsb in print_at
 
     call seed_rng               ; Seed PRNG from BIOS timer (INT 0x1A)
 

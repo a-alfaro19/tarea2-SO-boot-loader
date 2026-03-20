@@ -1,5 +1,3 @@
-
-
 #include <efi.h>
 #include <efilib.h>
 
@@ -20,17 +18,17 @@
 #define MAX_NAME_ROW    7
 #define MIN_NAME_ROW    1
 
-#define BG_R 0
-#define BG_G 0
-#define BG_B 64
+#define COLOR_BG_R 0
+#define COLOR_BG_G 0
+#define COLOR_BG_B 64
 
-#define GLYPH_R 0
-#define GLYPH_G 255
-#define GLYPH_B 64
+#define COLOR_GLYPH_R 0
+#define COLOR_GLYPH_G 255
+#define COLOR_GLYPH_B 64
 
-#define STATUS_R 255
-#define STATUS_G 255
-#define STATUS_B 0
+#define COLOR_STATUS_R 255
+#define COLOR_STATUS_G 255
+#define COLOR_STATUS_B 0
 
 /* ============================================================================
  * TYPES
@@ -119,9 +117,18 @@ static void put_pixel(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
     if (x >= gop->Mode->Info->HorizontalResolution) return;
     if (y >= gop->Mode->Info->VerticalResolution)   return;
 
-    fb[y * stride + x] = ((UINT32)r << 16) |
-                         ((UINT32)g <<  8) |
-                         ((UINT32)b);
+    /* Pack color into the correct byte order based on the pixel format.
+     * PixelBlueGreenRedReserved (BGRX): value = (r<<16)|(g<<8)|b
+     * PixelRedGreenBlueReserved (RGBX): value = (b<<16)|(g<<8)|r
+     * QEMU uses RGBX by default, real hardware typically uses BGRX.
+     * We check the pixel format at runtime to support both. */
+    UINT32 pixel;
+    if (gop->Mode->Info->PixelFormat == PixelRedGreenBlueReserved8BitPerColor)
+        pixel = ((UINT32)b << 16) | ((UINT32)g << 8) | r;
+    else
+        pixel = ((UINT32)r << 16) | ((UINT32)g << 8) | b;
+
+    fb[y * stride + x] = pixel;
 }
 
 static void fill_block(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
@@ -139,9 +146,9 @@ static void fill_block(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
 static void clear_screen(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
 {
     EFI_GRAPHICS_OUTPUT_BLT_PIXEL bg = {
-        .Blue     = BG_B,
-        .Green    = BG_G,
-        .Red      = BG_R,
+        .Blue     = COLOR_BG_B,
+        .Green    = COLOR_BG_G,
+        .Red      = COLOR_BG_R,
         .Reserved = 0
     };
 
@@ -211,7 +218,7 @@ static void draw_glyph(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
             INT32 out_r, out_c;
             transform(state, sr, sc, row_offset, col_offset, &out_r, &out_c);
 
-            fill_block(gop, out_c, out_r, GLYPH_R, GLYPH_G, GLYPH_B);
+            fill_block(gop, out_c, out_r, COLOR_GLYPH_R, COLOR_GLYPH_G, COLOR_GLYPH_B);
         }
     }
 }
