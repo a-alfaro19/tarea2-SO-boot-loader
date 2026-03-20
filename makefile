@@ -133,8 +133,69 @@ $(BUILD_UEFI)/uefi_disk.img: $(BUILD_UEFI)/BOOTX64.EFI $(BUILD_GAME)/game_uefi.b
 	@echo "  UEFI disk image created: $@"
 
 # =============================================================================
-# RUN TARGETS
+# UEFI-C BUILD
+# game_uefi.c is a self-contained EFI application — it has its own efi_main()
+# and does NOT use uefi_boot.c. It compiles directly to BOOTX64.EFI.
+# The disk image layout is the same: one EFI System Partition, BOOTX64.EFI
+# at EFI/BOOT/ — no separate game.bin payload needed.
 # =============================================================================
+BUILD_UEFI_C := build/uefi_c
+
+uefi-c: $(BUILD_UEFI_C)/uefi_c_disk.img
+	@echo ""
+	@echo "✔ UEFI-C disk image: $(BUILD_UEFI_C)/uefi_c_disk.img"
+	@echo "  Run with: make run-uefi-c"
+
+$(BUILD_UEFI_C)/game_uefi.o: uefi/game_uefi.c | $(BUILD_UEFI_C)
+	$(CC) -I$(EFI_INC) -I$(EFI_INC)/x86_64 \
+	      -fno-stack-protector -fpic -fshort-wchar -mno-red-zone \
+	      -Wall -DEFI_FUNCTION_WRAPPER \
+	      -c $< -o $@
+
+$(BUILD_UEFI_C)/game_uefi.so: $(BUILD_UEFI_C)/game_uefi.o
+	$(LD) -nostdlib -znocombreloc -T $(EFI_LD) -shared \
+	      -Bsymbolic -L$(EFI_LIB) $(EFI_CRT_OBJ) $< \
+	      -o $@ -lefi -lgnuefi
+
+$(BUILD_UEFI_C)/BOOTX64.EFI: $(BUILD_UEFI_C)/game_uefi.so
+	objcopy -j .text -j .sdata -j .data -j .dynamic \
+	        -j .dynsym -j .rel -j .rela -j .reloc \
+	        --target=efi-app-x86_64 $< $@
+
+$(BUILD_UEFI_C)/uefi_c_disk.img: $(BUILD_UEFI_C)/BOOTX64.EFI
+	$(DD) if=/dev/zero of=$@ bs=1M count=64 status=none
+	parted -s $@ mklabel gpt
+	parted -s $@ mkpart EFI fat32 1MiB 63MiB
+	parted -s $@ set 1 esp on
+	@LOOP=$$(sudo losetup --find --show --partscan $@); \
+	sudo mkfs.fat -F 32 $${LOOP}p1; \
+	sudo mkdir -p /tmp/efi_mount; \
+	sudo mount $${LOOP}p1 /tmp/efi_mount; \
+	sudo mkdir -p /tmp/efi_mount/EFI/BOOT; \
+	sudo cp $(BUILD_UEFI_C)/BOOTX64.EFI /tmp/efi_mount/EFI/BOOT/; \
+	sudo umount /tmp/efi_mount; \
+	sudo losetup -d $$LOOP
+	@echo "  UEFI-C disk image created: $@"
+
+run-uefi-c: $(BUILD_UEFI_C)/uefi_c_disk.img
+	@echo "Running UEFI-C game in QEMU..."
+	@if [ ! -f "$(OVMF)" ]; then \
+	    echo "ERROR: OVMF not found at $(OVMF)"; \
+	    echo "Install with: sudo apt install ovmf"; \
+	    exit 1; \
+	fi
+	$(QEMU) \
+	    -drive if=pflash,format=raw,file=$(OVMF),readonly=on \
+	    -drive format=raw,file=$(BUILD_UEFI_C)/uefi_c_disk.img \
+	    -m 256M \
+	    -no-reboot \
+	    -display sdl \
+	    -name "My Name - UEFI C Game"
+
+$(BUILD_UEFI_C):
+	mkdir -p $@
+
+
 run-legacy: $(BUILD_LEGACY)/disk.img
 	@echo "Running legacy boot in QEMU..."
 	$(QEMU) \
