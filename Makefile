@@ -174,7 +174,7 @@ run-uefi-c: $(BUILD_UEFI_C)/uefi_disk.img
 	    -drive format=raw,file=$(BUILD_UEFI_C)/uefi_disk.img \
 	    -device virtio-gpu \
 	    -no-reboot \
-	    -display gtk \
+	    -display gtk,grab-on-hover=on \
 	    -name "My Name - UEFI C Game"
 
 # =============================================================================
