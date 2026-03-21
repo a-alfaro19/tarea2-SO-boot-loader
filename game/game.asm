@@ -1,17 +1,15 @@
 ; =============================================================================
-; game.asm - "My Name" Bootable Game  (Legacy / Real Mode)
+; game.asm - "My Name" Bootable Game (Legacy Real Mode)
 ; CE 4303 - Principios de Sistemas Operativos
-;
-; Single flat file. Build:
-;   nasm -f bin game.asm -o game.bin
-;
-; Loaded by boot.asm at 0x0000:0x1000. First two bytes = magic 0xDEFD.
 ; =============================================================================
 
     org 0x1000
     bits 16
+    dw 0xDEFD
 
-    dw 0xDEFD           ; Magic number checked by boot.asm
+VGA_SEG     equ 0xB800
+ATTR_YELLOW equ 0x0F
+ATTR_GREEN  equ 0x0A
 
 ; =============================================================================
 ; ENTRY POINT
@@ -25,401 +23,364 @@ game_start:
     mov sp, 0x7000
     sti
 
-    ; Set 80x25 color text mode
     mov ax, 0x0003
     int 0x10
-    ; NOTE: we do NOT try to restore DS here. BIOS calls clobber DS freely.
-    ; All string printing uses BX as pointer (not lodsb/DS) so it doesn't matter.
 
-    call seed_rng
-    call show_confirm_screen
-    call game_loop
-    jmp reboot
+    xor ax, ax
+    int 0x1A
+    mov [seed], dx
 
-; =============================================================================
-; CONFIRMATION SCREEN
-; =============================================================================
-show_confirm_screen:
-    call clear_screen
+    mov ax, VGA_SEG
+    mov es, ax
+    xor ax, ax
+    mov ds, ax
 
-    mov bx, str_title
-    mov dh, 8
-    mov dl, 24
-    call print_at
+    call show_confirm
 
-    mov bx, str_press_y
-    mov dh, 12
-    mov dl, 24
-    call print_at
-
-    mov bx, str_controls
-    mov dh, 14
-    mov dl, 16
-    call print_at
-
-.wait:
-    mov ah, 0x00
-    int 0x16            ; Wait for keypress
-    cmp al, 'y'
-    je .done
-    cmp al, 'Y'
-    je .done
-    cmp al, 0x1B
-    je reboot
-    jmp .wait
-.done:
-    ret
-
-; =============================================================================
-; GAME LOOP
-; =============================================================================
-game_loop:
-    call init_game_state
-    call render_names
+.game:
+    call randomize
+    call render
 
 .poll:
     mov ah, 0x01
-    int 0x16            ; Check keyboard buffer (non-blocking)
-    jz .poll            ; ZF=1 = empty
+    int 0x16
+    jz .poll
 
     mov ah, 0x00
-    int 0x16            ; Read key
+    int 0x16
+
+    push ax
+    xor ax, ax
+    mov ds, ax
+    mov ax, VGA_SEG
+    mov es, ax
+    pop ax
 
     cmp al, 0x1B
     je .quit
-
     cmp al, 'r'
-    je game_loop
+    je .game
     cmp al, 'R'
-    je game_loop
-
-    cmp ah, 0x4B        ; Left arrow
-    je .rotate_left
-    cmp ah, 0x4D        ; Right arrow
-    je .rotate_right
-    cmp ah, 0x48        ; Up arrow
+    je .game
+    cmp ah, 0x4B
+    je .rotl
+    cmp ah, 0x4D
+    je .rotr
+    cmp ah, 0x48
     je .flip
-    cmp ah, 0x50        ; Down arrow
+    cmp ah, 0x50
     je .flip
-
     jmp .poll
 
-.rotate_left:
-    mov al, [rotation_state]
-    dec al
-    and al, 3
-    mov [rotation_state], al
-    call render_names
+.rotl:
+    dec byte [rot]
+    and byte [rot], 3
+    call render
     jmp .poll
-
-.rotate_right:
-    mov al, [rotation_state]
-    inc al
-    and al, 3
-    mov [rotation_state], al
-    call render_names
+.rotr:
+    inc byte [rot]
+    and byte [rot], 3
+    call render
     jmp .poll
-
 .flip:
-    xor byte [vertical_flip], 1
-    call render_names
+    xor byte [vflip], 1
+    call render
     jmp .poll
-
 .quit:
-    ret
-
-; =============================================================================
-; INIT GAME STATE
-; =============================================================================
-init_game_state:
-    call rand_byte
-    xor ah, ah
-    mov bl, 50
-    div bl
-    mov [name_col], ah
-
-    call rand_byte
-    xor ah, ah
-    mov bl, 7
-    div bl
-    inc ah
-    mov [name_row], ah
-
-    mov byte [rotation_state], 0
-    mov byte [vertical_flip], 0
-    ret
-
-; =============================================================================
-; REBOOT
-; =============================================================================
-reboot:
     db 0xEA
     dw 0x0000
     dw 0xFFFF
 
 ; =============================================================================
-; GAME STATE
+; CONFIRM SCREEN
 ; =============================================================================
-rotation_state  db 0
-vertical_flip   db 0
-name_row        db 3
-name_col        db 10
+show_confirm:
+    call cls
+    mov si, str_title
+    mov bx, 0x0818
+    call pr
+    mov si, str_press_y
+    mov bx, 0x0C18
+    call pr
+    mov si, str_controls
+    mov bx, 0x0E10
+    call pr
+.wait:
+    mov ah, 0x00
+    int 0x16
+    push ax
+    xor ax, ax
+    mov ds, ax
+    mov ax, VGA_SEG
+    mov es, ax
+    pop ax
+    cmp al, 'y'
+    je .go
+    cmp al, 'Y'
+    je .go
+    cmp al, 0x1B
+    je .esc
+    jmp .wait
+.esc:
+    db 0xEA
+    dw 0x0000
+    dw 0xFFFF
+.go:
+    ret
+
+; =============================================================================
+; RANDOMIZE
+; =============================================================================
+randomize:
+    call rng
+    xor ah, ah
+    mov bl, 50
+    div bl
+    mov [ncol], ah
+    call rng
+    xor ah, ah
+    mov bl, 7
+    div bl
+    inc ah
+    mov [nrow], ah
+    mov byte [rot], 0
+    mov byte [vflip], 0
+    ret
+
+rng:
+    mov ax, [seed]
+    mov cx, 6364
+    mul cx
+    add ax, 1013
+    mov [seed], ax
+    mov al, ah
+    xor ah, ah
+    ret
+
+seed  dw 0
+nrow  db 3
+ncol  db 10
+rot   db 0
+vflip db 0
+
+; =============================================================================
+; RENDER
+; =============================================================================
+render:
+    call cls
+    mov si, str_status
+    mov bx, 0x1700
+    call pr
+
+    mov byte [roff], 0
+    mov byte [coff], 0
+    mov byte [name_w], 24   ; MARCO: 5 letters * 5 - 1 = 24  (W-1)
+    mov word [gp], glyph_M
+    call dg
+    add byte [coff], 5
+    mov word [gp], glyph_A
+    call dg
+    add byte [coff], 5
+    mov word [gp], glyph_R
+    call dg
+    add byte [coff], 5
+    mov word [gp], glyph_C
+    call dg
+    add byte [coff], 5
+    mov word [gp], glyph_O
+    call dg
+    ret
+
+; =============================================================================
+; CLS
+; =============================================================================
+cls:
+    xor di, di
+    mov cx, 80*25
+    mov ax, 0x0720
+.l: mov [es:di], ax
+    add di, 2
+    loop .l
+    ret
+
+; =============================================================================
+; PR — print SI at BH=row BL=col. ES=VGA_SEG, DS=0
+; =============================================================================
+pr:
+    xor ah, ah
+    mov al, bh
+    mov cl, 7
+    shl ax, cl
+    push ax
+    xor ah, ah
+    mov al, bh
+    mov cl, 5
+    shl ax, cl
+    pop cx
+    add ax, cx
+    xor ch, ch
+    mov cl, bl
+    shl cx, 1
+    add ax, cx
+    mov di, ax
+.l: mov al, [si]
+    cmp al, 0
+    je .r
+    mov byte [es:di], al
+    mov byte [es:di+1], ATTR_YELLOW
+    add di, 2
+    inc si
+    jmp .l
+.r: ret
+
+; =============================================================================
+; DG — draw one glyph
+; =============================================================================
+dg:
+    mov byte [gr], 0
+.rl:
+    mov al, [gr]
+    cmp al, 5
+    jge .gd
+    mov byte [gc], 0
+.cl:
+    mov al, [gc]
+    cmp al, 4
+    jge .nr
+    mov al, [gr]
+    shl al, 1
+    shl al, 1
+    add al, [gc]
+    xor ah, ah
+    mov bx, [gp]
+    add bx, ax
+    mov al, [bx]
+    cmp al, 0
+    je .sk
+    call tf
+    xor ah, ah
+    mov al, bh
+    mov cl, 7
+    shl ax, cl
+    push ax
+    xor ah, ah
+    mov al, bh
+    mov cl, 5
+    shl ax, cl
+    pop cx
+    add ax, cx
+    xor ch, ch
+    mov cl, bl
+    shl cx, 1
+    add ax, cx
+    mov di, ax
+    mov byte [es:di],   0xDB
+    mov byte [es:di+1], ATTR_GREEN
+.sk:
+    inc byte [gc]
+    jmp .cl
+.nr:
+    inc byte [gr]
+    jmp .rl
+.gd:
+    ret
+
+; =============================================================================
+; TF — rotate whole name as one unit → BH=screen_row BL=screen_col
+;
+; Global position within the name:
+;   gR = [gr]            row within glyph (0..4)
+;   gC = [coff] + [gc]   global col across all letters (0..W-1)
+;
+; Rotations (H-1=4, W-1=[name_w]):
+;   rot0: out_r=gR,        out_c=gC
+;   rot1: out_r=gC,        out_c=4-gR     (right 90°, whole name clockwise)
+;   rot2: out_r=4-gR,      out_c=name_w-gC (180°)
+;   rot3: out_r=name_w-gC, out_c=gR       (left 90°)
+;
+; vflip: out_r = 4 - out_r
+; AL=out_r, AH=out_c on exit from rotation section
+; =============================================================================
+tf:
+    ; Compute gR (AL) and gC (AH)
+    mov al, [gr]
+    mov ah, [gc]
+    add ah, [coff]          ; AH = global col gC
+
+    mov cl, [rot]
+    cmp cl, 1
+    je .r1
+    cmp cl, 2
+    je .r2
+    cmp cl, 3
+    je .r3
+
+.r0:                        ; normal
+    jmp .vf                 ; AL=gR, AH=gC already correct
+
+.r1:                        ; right 90°: out_r=gC, out_c=4-gR
+    xchg al, ah             ; AL=gC, AH=gR
+    mov cl, 4
+    sub cl, ah
+    mov ah, cl              ; AH = 4-gR
+    jmp .vf
+
+.r2:                        ; 180°: out_r=4-gR, out_c=name_w-gC
+    mov cl, 4
+    sub cl, al
+    mov al, cl              ; AL = 4-gR
+    mov cl, [name_w]
+    sub cl, ah
+    mov ah, cl              ; AH = name_w-gC
+    jmp .vf
+
+.r3:                        ; left 90°: out_r=name_w-gC, out_c=gR
+    mov cl, [name_w]
+    sub cl, ah
+    mov ah, al              ; AH = gR (save before overwrite)
+    mov al, cl              ; AL = name_w-gC
+
+.vf:
+    cmp byte [vflip], 0
+    je .nv
+    mov cl, 4
+    sub cl, al
+    mov al, cl              ; AL = 4-out_r
+.nv:
+    ; BH = screen row = nrow + roff + out_r
+    ; BL = screen col = ncol + out_c
+    mov bh, [nrow]
+    add bh, [roff]
+    add bh, al
+    mov bl, [ncol]
+    add bl, ah
+    cmp bh, 22
+    jbe .rok
+    mov bh, 22
+.rok:
+    cmp bl, 79
+    jbe .cok
+    mov bl, 79
+.cok:
+    ret
+
+; =============================================================================
+; STATE
+; =============================================================================
+gr     db 0
+gc     db 0
+roff   db 0
+coff   db 0
+gp     dw 0
+name_w db 29    ; W-1 of current name (29=ANDRES, 24=MARCO)
 
 ; =============================================================================
 ; STRINGS
 ; =============================================================================
-str_title       db "=== MY NAME: ANDRES & MARCO ===", 0
-str_press_y     db "Press Y to play or ESC to exit", 0
-str_controls    db "[Arrows]=Rotate  [R]=Restart  [ESC]=Quit", 0
-str_status      db " [<][>]=Rotate  [^][v]=Flip  [R]=Restart  [ESC]=Quit ", 0
-
-; =============================================================================
-; PRNG
-; =============================================================================
-seed_rng:
-    xor ax, ax
-    int 0x1A
-    mov [rng_seed], dx
-    ret
-
-rand_byte:
-    push dx
-    mov ax, [rng_seed]
-    mov cx, 6364
-    mul cx
-    add ax, 1013
-    mov [rng_seed], ax
-    mov al, ah
-    xor ah, ah
-    pop dx
-    ret
-
-rng_seed    dw 0
-
-; =============================================================================
-; RENDERING
-; =============================================================================
-
-clear_screen:
-    mov ah, 0x06
-    xor al, al
-    xor cx, cx
-    mov dh, 24
-    mov dl, 79
-    mov bh, 0x07
-    int 0x10
-    mov ah, 0x02
-    xor bh, bh
-    xor dx, dx
-    int 0x10
-    ret
-
-; -----------------------------------------------------------------------------
-; print_at
-; BX = pointer to null-terminated string, DH = row, DL = col
-;
-; KEY DESIGN: uses [bx] to read characters, NOT lodsb.
-; BIOS INT 10h calls clobber DS on every call. lodsb depends on DS:SI.
-; BX is never modified by any BIOS call, so using [bx] + inc bx is safe.
-; -----------------------------------------------------------------------------
-print_at:
-    push bx
-    push dx
-
-    mov ah, 0x02        ; Set cursor position
-    xor bh, bh
-    int 0x10
-
-.next:
-    mov al, [bx]        ; Read byte using BX — completely independent of DS
-    cmp al, 0
-    je .done
-    mov ah, 0x0E        ; Teletype output
-    xor bh, bh
-    int 0x10            ; DS may be clobbered here — doesn't matter, we use BX
-    inc bx
-    jmp .next
-
-.done:
-    pop dx
-    pop bx
-    ret
-
-render_names:
-    call clear_screen
-
-    mov bx, str_status
-    mov dh, 23
-    mov dl, 0
-    call print_at
-
-    call draw_name1
-    call draw_name2
-    ret
-
-draw_name1:
-    mov byte [cur_row_off], 0
-    mov byte [cur_col_off], 0
-    mov word [glyph_ptr], glyph_A
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_N
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_D
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_R
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_E
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_S
-    call draw_glyph
-    ret
-
-draw_name2:
-    mov byte [cur_row_off], 7
-    mov byte [cur_col_off], 0
-    mov word [glyph_ptr], glyph_M
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_A
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_R
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_C
-    call draw_glyph
-    add byte [cur_col_off], 5
-    mov word [glyph_ptr], glyph_O
-    call draw_glyph
-    ret
-
-draw_glyph:
-    ; glyph_ptr must be set by caller before calling this function.
-    ; Stored in memory so INT 10h calls cannot clobber it.
-    mov byte [glyph_row], 0
-
-.row_loop:
-    mov al, [glyph_row]
-    cmp al, 5
-    jge .done
-
-    mov byte [glyph_col], 0
-
-.col_loop:
-    mov al, [glyph_col]
-    cmp al, 4
-    jge .next_row
-
-    ; Compute index = row*4 + col, read cell value
-    mov al, [glyph_row]
-    mov bl, 4
-    mul bl              ; AX = row*4
-    add al, [glyph_col]
-    xor ah, ah
-    mov bx, [glyph_ptr] ; Reload glyph base from memory each time
-    add bx, ax
-    mov cl, [bx]        ; CL = cell value
-
-    cmp cl, 0
-    je .skip
-
-    call transform_coords   ; -> DH=row, DL=col
-
-    ; Draw block character — use push/pop to protect DX across INT 10h
-    push dx
-    mov ah, 0x02        ; Set cursor
-    xor bh, bh
-    int 0x10            ; May clobber SI, DS, etc — we don't care
-    pop dx
-
-    push dx
-    mov ah, 0x09        ; Write char + attribute
-    mov al, 0xDB        ; Full block
-    mov bl, 0x0A        ; Bright green
-    mov cx, 1
-    int 0x10
-    pop dx
-
-.skip:
-    inc byte [glyph_col]
-    jmp .col_loop
-
-.next_row:
-    inc byte [glyph_row]
-    jmp .row_loop
-
-.done:
-    ret
-
-transform_coords:
-    mov al, [glyph_row]
-    mov bl, [glyph_col]
-
-    mov cl, [rotation_state]
-    cmp cl, 1
-    je .rot1
-    cmp cl, 2
-    je .rot2
-    cmp cl, 3
-    je .rot3
-
-.rot0:
-    mov ah, al
-    mov bh, bl
-    jmp .vflip
-.rot1:
-    mov ah, bl
-    mov bh, 4
-    sub bh, al
-    jmp .vflip
-.rot2:
-    mov ah, 4
-    sub ah, al
-    mov bh, 3
-    sub bh, bl
-    jmp .vflip
-.rot3:
-    mov ah, 3
-    sub ah, bl
-    mov bh, al
-
-.vflip:
-    cmp byte [vertical_flip], 0
-    je .no_vflip
-    mov cl, 4
-    sub cl, ah
-    mov ah, cl
-.no_vflip:
-    mov dh, [name_row]
-    add dh, [cur_row_off]
-    add dh, ah
-    mov dl, [name_col]
-    add dl, [cur_col_off]
-    add dl, bh
-    cmp dh, 22
-    jbe .row_ok
-    mov dh, 22
-.row_ok:
-    cmp dl, 79
-    jbe .col_ok
-    mov dl, 79
-.col_ok:
-    ret
-
-; =============================================================================
-; RENDER STATE
-; =============================================================================
-glyph_row   db 0
-glyph_col   db 0
-cur_row_off db 0
-cur_col_off db 0
-glyph_ptr   dw 0        ; Glyph base pointer — stored in memory, not a register,
-                        ; so INT 10h calls cannot clobber it
+str_title    db "=== MY NAME: ANDRES & MARCO ===", 0
+str_press_y  db "Press Y to play or ESC to exit", 0
+str_controls db "[Arrows]=Rotate  [R]=Restart  [ESC]=Quit", 0
+str_status   db " [<][>]=Rotate  [^][v]=Flip  [R]=Restart  [ESC]=Quit ", 0
 
 ; =============================================================================
 ; GLYPHS

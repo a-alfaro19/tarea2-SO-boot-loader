@@ -85,7 +85,6 @@ $(BUILD_LEGACY)/disk.img: $(BUILD_LEGACY)/boot.bin $(BUILD_GAME)/game.bin
 	$(DD) if=/dev/zero                of=$@ bs=512 count=2880 status=none
 	$(DD) if=$(BUILD_LEGACY)/boot.bin of=$@ bs=512 seek=0 conv=notrunc status=none
 	$(DD) if=$(BUILD_GAME)/game.bin   of=$@ bs=512 seek=1 conv=notrunc status=none
-
 # =============================================================================
 # UEFI C BUILD
 # Compiles uefi_game.c into a self-contained EFI application (BOOTX64.EFI),

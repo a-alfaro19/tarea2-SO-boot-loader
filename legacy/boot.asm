@@ -25,7 +25,7 @@ load_game:
 
     ; 3. Read Game from Disk (Sector 2)
     mov ah, 0x02                ; BIOS read sector function
-    mov al, 1                   ; Number of sectors to read
+    mov al, 16                  ; Number of sectors to read
     mov ch, 0                   ; Cylinder 0
     mov cl, 2                   ; Sector 2 (Sector 1 is the bootloader)
     mov dh, 0                   ; Head 0
