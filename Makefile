@@ -125,7 +125,7 @@ $(BUILD_UEFI_C)/BOOTX64.EFI: $(BUILD_UEFI_C)/game_uefi.so
 #   file@@@offset means "treat the file starting at byte <offset> as a
 #   FAT filesystem". 1MiB = 1048576 bytes = where parted placed the ESP.
 # MTOOLS_SKIP_CHECK=1 suppresses geometry mismatch warnings on raw files.
-$(BUILD_UEFI_C)/uefi_disk.img: $(BUILD_UEFI_C)/BOOTX64.EFI
+$(BUILD_UEFI_C)/uefi_disk.img: $(BUILD_UEFI_C)/BOOTX64.EFI $(BUILD_GAME)/game.bin
 	$(DD) if=/dev/zero of=$@ bs=1M count=64 status=none
 	parted -s $@ mklabel gpt
 	parted -s $@ mkpart EFI fat32 1MiB 63MiB
@@ -135,6 +135,8 @@ $(BUILD_UEFI_C)/uefi_disk.img: $(BUILD_UEFI_C)/BOOTX64.EFI
 	MTOOLS_SKIP_CHECK=1 $(MMD)     -i $@@@1M ::/EFI/BOOT
 	MTOOLS_SKIP_CHECK=1 $(MCOPY)   -i $@@@1M \
 	    $(BUILD_UEFI_C)/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+	MTOOLS_SKIP_CHECK=1 $(MCOPY)   -i $@@@1M \
+	    $(BUILD_GAME)/game.bin ::/game.bin
 
 # =============================================================================
 # RUN TARGETS
@@ -172,9 +174,8 @@ run-uefi-c: $(BUILD_UEFI_C)/uefi_disk.img
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	    -drive if=pflash,format=raw,file=$(BUILD_UEFI_C)/OVMF_VARS_runtime.fd \
 	    -drive format=raw,file=$(BUILD_UEFI_C)/uefi_disk.img \
-	    -device virtio-gpu \
 	    -no-reboot \
-	    -display gtk,grab-on-hover=on \
+	    -display gtk \
 	    -name "My Name - UEFI C Game"
 
 # =============================================================================
