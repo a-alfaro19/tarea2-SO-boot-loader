@@ -167,10 +167,12 @@ run-uefi-c: $(BUILD_UEFI_C)/uefi_disk.img
 	fi
 	@cp $(OVMF_VARS) $(BUILD_UEFI_C)/OVMF_VARS_runtime.fd
 	$(QEMU) \
+	    -machine q35 \
+	    -m 256M \
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	    -drive if=pflash,format=raw,file=$(BUILD_UEFI_C)/OVMF_VARS_runtime.fd \
 	    -drive format=raw,file=$(BUILD_UEFI_C)/uefi_disk.img \
-	    -m 256M \
+	    -device virtio-gpu \
 	    -no-reboot \
 	    -display gtk \
 	    -name "My Name - UEFI C Game"
