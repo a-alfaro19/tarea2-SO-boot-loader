@@ -75,14 +75,10 @@ $(BUILD_LEGACY)/boot.bin: legacy/boot.asm | $(BUILD_LEGACY)
 	fi
 
 # Assemble game payload -- game_main.asm pulls in all modules via %include
-GAME_SOURCES := game/game_main.asm \
-                game/game_rand.asm \
-                game/game_input.asm \
-                game/game_render.asm \
-                game/game_glyphs.asm
+GAME_SOURCES := game/game.asm
 
 $(BUILD_GAME)/game.bin: $(GAME_SOURCES) | $(BUILD_GAME)
-	$(NASM) -f bin -I game/ game/game_main.asm -o $@
+	$(NASM) -f bin game/game.asm -o $@
 
 # Create the floppy disk image: blank 1.44MB, then write both sectors
 $(BUILD_LEGACY)/disk.img: $(BUILD_LEGACY)/boot.bin $(BUILD_GAME)/game.bin
